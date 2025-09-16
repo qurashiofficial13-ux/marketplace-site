@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Safe Accounts Marketplace</title>
+
+  <!-- Tailwind CDN (for quick demo) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Firebase SDKs (modular via compat for simplicity) -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-storage-compat.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen font-sans">
+
+  <div class="max-w-5xl mx-auto p-6">
+    <header class="flex items-center justify-between mb-6">
+      <h1 class="text-2xl font-bold">Safe Accounts Marketplace</h1>
+      <div id="authArea" class="text-sm"></div>
+    </header>
+
+    <main class="grid md:grid-cols-3 gap-6">
+      <!-- Left: Listings -->
+      <section class="md:col-span-2">
+        <div class="bg-white p-4 rounded shadow">
+          <div class="flex items-center justify-between">
+            <h2 class="font-semibold text-lg">Active Listings</h2>
+            <div>
+              <select id="filter" class="border rounded p-1 text-sm">
+                <option value="all">All</option>
+                <option value="verified">Verified</option>
+                <option value="pending">Pending</option>
+              </select>
+            </div>
+          </div>
+          <div id="listings" class="mt-4 space-y-4"></div>
+        </div>
+
+        <div id="adminPanel" class="bg-white p-4 mt-4 rounded shadow hidden">
+          <h3 class="font-semibold">Admin Panel</h3>
+          <p class="text-sm text-gray-600 mt-1">Approve / reject listings and payments.</p>
+          <div id="adminQueue" class="mt-3 space-y-3"></div>
+        </div>
+      </section>
+
+      <!-- Right: Auth / Create / Payment -->
+      <aside>
+        <div id="authCard" class="bg-white p-4 rounded shadow">
+          <h3 class="font-semibold">Account</h3>
+          <div id="authForms" class="mt-3 space-y-3">
+            <!-- Signup / Login forms inserted here by JS -->
+          </div>
+        </div>
+
+        <div id="createCard" class="bg-white p-4 mt-4 rounded shadow hidden">
+          <h3 class="font-semibold">Create Listing</h3>
+          <form id="createForm" class="mt-2 space-y-2">
+            <input id="sellerName" class="w-full border rounded p-2" placeholder="Seller name / WhatsApp" />
+            <input id="uid" class="w-full border rounded p-2" placeholder="Game UID (required)" />
+            <input id="server" class="w-full border rounded p-2" placeholder="Server / Region" />
+            <input id="price" class="w-full border rounded p-2" placeholder="Price (PKR)" />
+            <textarea id="desc" class="w-full border rounded p-2" placeholder="Description (skins, rank)"></textarea>
+            <input id="media" class="w-full border rounded p-2" placeholder="Media image URL (optional)" />
+            <div class="flex gap-2">
+              <button class="px-3 py-2 bg-orange-500 text-white rounded" type="submit">Create Listing</button>
+              <button type="button" id="clearCreate" class="px-3 py-2 border rounded">Clear</button>
+            </div>
+            <p class="text-xs text-gray-500">Never include passwords or OTP in listings.</p>
+          </form>
+        </div>
+
+        <div id="paymentCard" class="bg-white p-4 mt-4 rounded shadow">
+          <h3 class="font-semibold">Payments (JazzCash)</h3>
+          <div class="mt-2 text-sm">
+            <div><strong>JazzCash Name:</strong> <span id="jcName">Noraiz ejaz</span></div>
+            <div><strong>Number:</strong> <span id="jcNumber">03354370203</span></div>
+            <p class="text-xs text-gray-500 mt-2">Instructions: Send payment, take screenshot / TXN ID, then click Upload proof on the listing you bought.</p>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <footer class="text-center text-sm text-gray-500 mt-6">
+      Demo — For production: setup backend rules, store sensitive config securely, and follow local laws. Never ask for passwords.
+    </footer>
+  </div>
+
+<script>
+/* ===========================
+   CONFIG - Replace these!
+   ===========================
+   1) Create Firebase project at https://console.firebase.google.com/
+   2) Enable Authentication -> Email/Password
+   3) Enable Firestore (native mode)
+   4) Enable Storage
+   5) Copy your Firebase config and paste into FIREBASE_CONFIG below.
+   6) Set ADMIN_EMAIL to the admin's email (who can verify listings).
+*/
+
+const FIREBASE_CONFIG = {
+  apiKey: "REPLACE_WITH_YOUR_API_KEY",
+  authDomain: "REPLACE_WITH_YOUR_AUTH_DOMAIN",
+  projectId: "REPLACE_WITH_YOUR_PROJECT_ID",
+  storageBucket: "REPLACE_WITH_YOUR_STORAGE_BUCKET",
+  messagingSenderId: "REPLACE_WITH_YOUR_MESSAGING_SENDER_ID",
+  appId: "REPLACE_WITH_YOUR_APP_ID"
+};
+
+// Admin email who can approve listings (replace)
+const ADMIN_EMAIL = "admin@example.com";
+
+/* ===========================
+   End config
+   =========================== */
+
+if (FIREBASE_CONFIG.apiKey === "REPLACE_WITH_YOUR_API_KEY") {
+  console.warn("Firebase config not replaced. Create Firebase project and replace FIREBASE_CONFIG in the file.");
+}
+
+/* Initialize Firebase (compat simple API) */
+firebase.initializeApp(FIREBASE_CONFIG);
+const auth = firebase.auth();
+const db = firebase.firestore();
+const storage = firebase.storage();
+
+/* UI elements */
+const authArea = document.getElementById('authArea');
+const authForms = document.getElementById('authForms');
+const createCard = document.getElementById('createCard');
+const paymentCard = document.getElementById('paymentCard');
+const listingsEl = document.getElementById('listings');
+const adminPanel = document.getElementById('adminPanel');
+const adminQueue = document.getElementById('adminQueue');
+const filterSel = document.getElementById('filter');
+
+/* Build auth forms */
+function showAuthForms(){
+  authForms.innerHTML = `
+    <div id="signupBox">
+      <input id="suEmail" class="w-full border rounded p-2" placeholder="Email (for signup)" />
+      <input id="suPass" type="password" class="w-full border rounded p-2 mt-2" placeholder="Password" />
+      <div class="flex gap-2 mt-2">
+        <button id="btnSignup" class="px-3 py-2 bg-green-600 text-white rounded">Sign up</button>
+        <button id="btnGotoLogin" class="px-3 py-2 border rounded">Go to Login</button>
+      </div>
+    </div>
+    <div id="loginBox" class="hidden">
+      <input id="liEmail" class="w-full border rounded p-2" placeholder="Email (login)" />
+      <input id="liPass" type="password" class="w-full border rounded p-2 mt-2" placeholder="Password" />
+      <div class="flex gap-2 mt-2">
+        <button id="btnLogin" class="px-3 py-2 bg-blue-600 text-white rounded">Login</button>
+        <button id="btnGotoSignup" class="px-3 py-2 border rounded">Go to Signup</button>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('btnGotoLogin').onclick = ()=>{ document.getElementById('signupBox').classList.add('hidden'); document.getElementById('loginBox').classList.remove('hidden'); };
+  document.getElementById('btnGotoSignup').onclick = ()=>{ document.getElementById('loginBox').classList.add('hidden'); document.getElementById('signupBox').classList.remove('hidden'); };
+
+  document.getElementById('btnSignup').onclick = async ()=>{
+    const email = document.getElementById('suEmail').value.trim();
+    const pass = document.getElementById('suPass').value;
+    if(!email || !pass){ alert('Provide email and password'); return; }
+    try {
+      await auth.createUserWithEmailAndPassword(email, pass);
+      alert('Signup successful — logged in');
+    } catch(e) { alert('Signup error: ' + e.message); }
+  };
+
+  document.getElementById('btnLogin').onclick = async ()=>{
+    const email = document.getElementById('liEmail').value.trim();
+    const pass = document.getElementById('liPass').value;
+    if(!email || !pass){ alert('Provide email and password'); return; }
+    try {
+      await auth.signInWithEmailAndPassword(email, pass);
+      alert('Login successful');
+    } catch(e){ alert('Login error: ' + e.message); }
+  };
+}
+
+/* Render auth area top-right */
+function renderAuthArea(user){
+  if(user){
+    authArea.innerHTML = `<span class="mr-4">Hello, <strong>${user.email}</strong></span>
+      <button id="btnLogout" class="px-3 py-1 border rounded text-sm">Logout</button>`;
+    document.getElementById('btnLogout').onclick = ()=> auth.signOut();
+  } else {
+    authArea.innerHTML = `<span class="text-sm text-gray-600">Not signed in</span>`;
+  }
+}
+
+/* Create listing form handler */
+function setupCreateForm(user){
+  if(!user) return;
+  document.getElementById('createForm').onsubmit = async (e)=>{
+    e.preventDefault();
+    const seller = document.getElementById('sellerName').value.trim() || user.email;
+    const uid = document.getElementById('uid').value.trim();
+    const server = document.getElementById('server').value.trim();
+    const price = document.getElementById('price').value.trim();
+    const desc = document.getElementById('desc').value.trim();
+    const media = document.getElementById('media').value.trim();
+
+    if(!uid || !price){ alert('UID and price required'); return; }
+
+    const doc = {
+      seller, uid, server, price, desc, media,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      verified: false,
+      escrow: null,
+      sellerEmail: user.email
+    };
+
+    try {
+      await db.collection('listings').add(doc);
+      alert('Listing created — admin will verify.');
+      document.getElementById('createForm').reset();
+    } catch(e){ alert('Error: ' + e.message); }
+  };
+
+  document.getElementById('clearCreate').onclick = ()=> document.getElementById('createForm').reset();
+}
+
+/* Load & render listings */
+async function loadListings(){
+  const filter = filterSel.value;
+  let q = db.collection('listings').orderBy('createdAt','desc').limit(100);
+  // client-side filter applied after fetch because simple demo
+  const snap = await q.get();
+  const docs = snap.docs.map(d => ({ id: d.id, ...d.data(), createdAt: d.data().createdAt && d.data().createdAt.toDate ? d.data().createdAt.toDate() : null }));
+  renderListings(docs);
+}
+
+/* Render listing cards */
+function renderListings(items){
+  listingsEl.innerHTML = '';
+  const filter = filterSel.value;
+  items.forEach(item=>{
+    if(filter === 'verified' && !item.verified) return;
+    if(filter === 'pending' && (item.verified || item.rejected)) return;
+
+    const card = document.createElement('div');
+    card.className = 'bg-white p-3 rounded shadow-sm flex justify-between items-start';
+    card.innerHTML = `
+      <div>
+        <div class="font-medium">UID: ${escapeHtml(item.uid)} <span class="text-xs text-gray-500">• ${escapeHtml(item.server||'')}</span></div>
+        <div class="text-sm text-gray-600 mt-1">${escapeHtml(item.desc||'')}</div>
+        <div class="text-xs text-gray-500 mt-2">Seller: ${escapeHtml(item.seller||'')} • Price: PKR ${escapeHtml(item.price||'')}</div>
+        <div class="text-xs text-gray-400 mt-1">Status: ${item.verified ? '<span class="text-green-600">Verified</span>' : item.rejected ? '<span class="text-red-600">Rejected</span>' : (item.escrow ? '<span class="text-yellow-600">In Escrow</span>' : 'Open')}</div>
+        <div class="text-xs text-gray-500 mt-1">Media: ${escapeHtml(item.media||'none')}</div>
+      </div>
+      <div class="flex flex-col gap-2 items-end">
+        ${item.verified ? '' : `<button data-id="${item.id}" class="btnBuy px-3 py-1 rounded bg-indigo-600 text-white text-sm">Buy (Escrow)</button>`}
+        ${!item.verified ? `<button data-id="${item.id}" class="btnUpload px-3 py-1 rounded border text-sm">Upload Proof</button>` : ''}
+        ${/* show admin actions if current user is admin - will be attached in event handlers */''}
+        <button data-id="${item.id}" class="btnView px-3 py-1 rounded border text-sm">View</button>
+      </div>
+    `;
+    listingsEl.appendChild(card);
+  });
+
+  // attach handlers
+  document.querySelectorAll('.btnBuy').forEach(btn=>{
+    btn.onclick = ()=> {
+      const id = btn.getAttribute('data-id');
+      // show simple alert and instruct to upload proof
+      alert('Send payment to JazzCash then click Upload Proof on this listing and paste TXN ID or screenshot link.');
+    };
+  });
+
+  document.querySelectorAll('.btnUpload').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const id = btn.getAttribute('data-id');
+      const proof = prompt('Paste transaction ID or link to payment screenshot (demo):');
+      if(!proof) return;
+      try {
+        await db.collection('listings').doc(id).update({
+          escrow: { status: 'pending', proof, at: firebase.firestore.FieldValue.serverTimestamp() },
+          logs: firebase.firestore.FieldValue.arrayUnion({ at: firebase.firestore.FieldValue.serverTimestamp(), text: 'Payment proof submitted: ' + proof })
+        });
+        alert('Proof submitted. Admin will verify.');
+        loadListings();
+      } catch(e){ alert('Error: ' + e.message); }
+    };
+  });
+
+  document.querySelectorAll('.btnView').forEach(btn=>{
+    btn.onclick = async ()=>{
+      const id = btn.getAttribute('data-id');
+      const doc = await db.collection('listings').doc(id).get();
+      const data = doc.data();
+      alert('Listing details:\\nUID: ' + data.uid + '\\nSeller: ' + data.seller + '\\nPrice: ' + data.price + '\\nMedia: ' + (data.media||'none') + '\\nEscrow: ' + (data.escrow ? JSON.stringify(data.escrow) : 'none'));
+    };
+  });
+
+  attachAdminButtons(); // re-check admin state
+}
+
+/* Admin queue render (if admin) */
+async function renderAdminQueue(user){
+  adminQueue.innerHTML = '';
+  if(!user || user.email !== ADMIN_EMAIL) return;
+  adminPanel.classList.remove('hidden');
+  const snap = await db.collection('listings').orderBy('createdAt','desc').limit(50).get();
+  snap.docs.forEach(d=>{
+    const it = { id: d.id, ...d.data() };
+    if(it.verified || it.rejected) return;
+    const el = document.createElement('div');
+    el.className = 'p-3 border rounded flex justify-between items-start';
+    el.innerHTML = `
+      <div>
+        <div class="font-medium">UID: ${escapeHtml(it.uid)} • PKR ${escapeHtml(it.price)}</div>
+        <div class="text-sm text-gray-600">Seller: ${escapeHtml(it.seller)} • Media: ${escapeHtml(it.media||'none')}</div>
+        <div class="text-xs text-gray-500 mt-1">Escrow: ${escapeHtml(JSON.stringify(it.escrow||'none'))}</div>
+      </div>
+      <div class="flex flex-col gap-2">
+        <button data-id="${it.id}" class="approve px-3 py-1 rounded bg-green-600 text-white text-sm">Approve</button>
+        <button data-id="${it.id}" class="reject px-3 py-1 rounded border text-sm">Reject</button>
+      </div>
+    `;
+    adminQueue.appendChild(el);
+  });
+
+  adminQueue.querySelectorAll('.approve').forEach(b=>{
+    b.onclick = async ()=>{
+      const id = b.getAttribute('data-id');
+      if(!confirm('Approve listing and release escrow (simulated)?')) return;
+      await db.collection('listings').doc(id).update({
+        verified: true,
+        escrow: firebase.firestore.FieldValue.delete(),
+        logs: firebase.firestore.FieldValue.arrayUnion({ at: firebase.firestore.FieldValue.serverTimestamp(), text: 'Admin approved' })
+      });
+      alert('Approved');
+      loadListings(); renderAdminQueue(auth.currentUser);
+    };
+  });
+
+  adminQueue.querySelectorAll('.reject').forEach(b=>{
+    b.onclick = async ()=>{
+      const id = b.getAttribute('data-id');
+      const reason = prompt('Reject reason (short):') || 'Rejected by admin';
+      await db.collection('listings').doc(id).update({
+        rejected: true,
+        escrow: firebase.firestore.FieldValue.delete(),
+        logs: firebase.firestore.FieldValue.arrayUnion({ at: firebase.firestore.FieldValue.serverTimestamp(), text: 'Admin rejected: ' + reason })
+      });
+      alert('Rejected');
+      loadListings(); renderAdminQueue(auth.currentUser);
+    };
+  });
+}
+
+/* Attach admin buttons to each listing card if current user is admin */
+function attachAdminButtons(){
+  const user = auth.currentUser;
+  if(!user || user.email !== ADMIN_EMAIL) return;
+  document.querySelectorAll('[data-id]').forEach(btn=>{
+    // add admin approve/reject under the card if not present
+    const parent = btn.closest('.bg-white');
+    // simplified: we won't duplicate controls in demo
+  });
+}
+
+/* Escape HTML utility */
+function escapeHtml(s){ if(!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+/* Auth state listener */
+auth.onAuthStateChanged(async (user)=>{
+  renderAuthArea(user);
+  if(user){
+    // show create listing
+    createCard.classList.remove('hidden');
+    showAuthForms(); // still show forms but logged in state will show logout top-right
+    setupCreateForm(user);
+    // hide signup/login forms visually
+    authForms.innerHTML = `<div class="text-sm">Signed in as <strong>${escapeHtml(user.email)}</strong></div><div class="mt-2"><button id="btnSignOut" class="px-3 py-1 border rounded">Sign out</button></div>`;
+    document.getElementById('btnSignOut').onclick = ()=> auth.signOut();
+  } else {
+    createCard.classList.add('hidden');
+    showAuthForms();
+  }
+
+  // Admin panel
+  if(user && user.email === ADMIN_EMAIL){
+    adminPanel.classList.remove('hidden');
+    renderAdminQueue(user);
+  } else {
+    adminPanel.classList.add('hidden');
+  }
+
+  // load listings always
+  loadListings();
+});
+
+/* filter change */
+filterSel.onchange = ()=> loadListings();
+
+/* Initialize forms display */
+showAuthForms();
+loadListings();
+
+</script>
+</body>
+        </html>
